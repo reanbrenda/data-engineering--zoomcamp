@@ -166,10 +166,10 @@ def remove_old_data(bq_client: bigquery.Client, table: str, ds: str) -> None:
             
             if rows_to_delete > 0:
                 delete_query = bq_client.query(
-                    f"""
-                    DELETE FROM `{table}` WHERE DATE(actual_timestamp) = "{ds}"
-                    """
-                )
+            f"""
+            DELETE FROM `{table}` WHERE DATE(actual_timestamp) = "{ds}"
+            """
+        )
                 delete_query.result()
                 logging.info(f"Successfully deleted {rows_to_delete} rows for date {ds}")
             else:
@@ -463,7 +463,7 @@ def _load_data_to_bigquery(**context) -> None:
         logging.info(f"BigQuery job started: {job.job_id}")
         
         # Wait for job completion
-        job.result()
+    job.result()
         logging.info("BigQuery job completed successfully!")
         
         # Get job statistics

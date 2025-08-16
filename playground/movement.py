@@ -255,7 +255,7 @@ class NetworkRailListener(stomp.ConnectionListener):
     def on_message(self, frame):
         """Process incoming messages."""
         try:
-            headers, message_raw = frame.headers, frame.body
+        headers, message_raw = frame.headers, frame.body
 
             # Acknowledge message receipt
             if "message-id" in headers and "subscription" in headers:
@@ -265,9 +265,9 @@ class NetworkRailListener(stomp.ConnectionListener):
                 )
             
             # Parse and process messages
-            parsed_body = json.loads(message_raw)
+        parsed_body = json.loads(message_raw)
 
-            for message in parsed_body:
+        for message in parsed_body:
                 try:
                     logger.info(f"Processing message: {message.get('header', {}).get('msg_type', 'unknown')}")
                     processed_data = self.processor.process_movement_message(message)
