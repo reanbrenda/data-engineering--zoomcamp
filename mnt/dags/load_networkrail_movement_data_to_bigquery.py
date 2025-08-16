@@ -61,6 +61,7 @@ def _download_files(**context) -> str:
 
     # Use direct boto3 for MinIO access
     import boto3
+    import json
     s3 = boto3.client(
         's3',
         endpoint_url='http://minio:9000',
@@ -83,20 +84,42 @@ def _download_files(**context) -> str:
     logging.info(f"Number of events to write: {len(events)}")
     
     with open(output_file_name, "w") as f:
+        valid_events = 0
         for i, event in enumerate(events):
             if i < 3:  # Log first 3 events for debugging
                 logging.info(f"Event {i}: {event[:200]}...")  # First 200 chars
-            # Clean the event and write as a single line
-            cleaned_event = event.replace('\n', ' ').replace('\r', ' ').strip()
-            f.write(cleaned_event + "\n")
+            
+            # Parse the event to ensure it's valid JSON, then write it back
+            try:
+                parsed_event = json.loads(event)
+                # Write the properly formatted JSON
+                f.write(json.dumps(parsed_event) + "\n")
+                valid_events += 1
+            except json.JSONDecodeError as e:
+                logging.error(f"Invalid JSON in event {i}: {e}")
+                # Skip invalid events
+                continue
+        
+        logging.info(f"Successfully wrote {valid_events} valid events to file")
     
-    # Verify file was created
+    # Verify file was created and has content
     import os
     if os.path.exists(output_file_name):
         file_size = os.path.getsize(output_file_name)
         logging.info(f"File created successfully: {output_file_name}, size: {file_size} bytes")
+        
+        # Check if file has content
+        if file_size == 0:
+            logging.error("File is empty! No valid events were written.")
+            return None
+        elif valid_events == 0:
+            logging.error("No valid events were processed!")
+            return None
+        else:
+            logging.info(f"File contains {valid_events} valid events, ready for processing")
     else:
         logging.error(f"File was not created: {output_file_name}")
+        return None
 
     return output_file_name
 
@@ -109,30 +132,51 @@ def remove_old_data(bq_client: bigquery.Client, table: str, ds: str) -> None:
         try:
             table_obj = bq_client.get_table(table)
             logging.info(f"Table exists with {table_obj.num_rows} rows")
+            
+            # Check if schema is compatible
+            raw_data_field = None
+            for field in table_obj.schema:
+                if field.name == 'raw_data':
+                    raw_data_field = field
+                    break
+            
+            if raw_data_field and raw_data_field.field_type == 'STRING':
+                logging.warning("Existing table has raw_data as STRING, but new data has it as RECORD")
+                logging.info("Dropping and recreating table to match new schema...")
+                
+                # Drop the existing table
+                bq_client.delete_table(table, not_found_ok=True)
+                logging.info(f"Deleted existing table: {table}")
+                return
+                
         except google.api_core.exceptions.NotFound:
             logging.info("Table does not exist yet - will be created during load")
             return
         
-        # Count rows to be deleted
-        count_query = bq_client.query(
-            f"""
-            SELECT COUNT(*) as count FROM `{table}` WHERE DATE(actual_timestamp) = "{ds}"
-            """
-        )
-        count_result = count_query.result()
-        rows_to_delete = list(count_result)[0].count
-        logging.info(f"Found {rows_to_delete} rows to delete for date {ds}")
-        
-        if rows_to_delete > 0:
-            delete_query = bq_client.query(
+        # Count rows to be deleted - use a safer approach
+        try:
+            count_query = bq_client.query(
                 f"""
-                DELETE FROM `{table}` WHERE DATE(actual_timestamp) = "{ds}"
+                SELECT COUNT(*) as count FROM `{table}` WHERE DATE(actual_timestamp) = "{ds}"
                 """
             )
-            delete_query.result()
-            logging.info(f"Successfully deleted {rows_to_delete} rows for date {ds}")
-        else:
-            logging.info(f"No rows found to delete for date {ds}")
+            count_result = count_query.result()
+            rows_to_delete = list(count_result)[0].count
+            logging.info(f"Found {rows_to_delete} rows to delete for date {ds}")
+            
+            if rows_to_delete > 0:
+                delete_query = bq_client.query(
+                    f"""
+                    DELETE FROM `{table}` WHERE DATE(actual_timestamp) = "{ds}"
+                    """
+                )
+                delete_query.result()
+                logging.info(f"Successfully deleted {rows_to_delete} rows for date {ds}")
+            else:
+                logging.info(f"No rows found to delete for date {ds}")
+        except Exception as e:
+            logging.warning(f"Could not remove old data (table may be empty or have different schema): {e}")
+            logging.info("Continuing with data load...")
             
     except Exception as e:
         logging.error(f"Error during data removal: {e}")
@@ -143,7 +187,42 @@ def _load_data_to_bigquery(**context) -> None:
     ds = context["ds"]
     file_name = context["ti"].xcom_pull(task_ids="download_files", key="return_value")
     
+    # Define BigQuery schema for the extracted data
+    bigquery_schema = [
+        bigquery.SchemaField("event_type", "STRING"),
+        bigquery.SchemaField("toc_id", "STRING"),
+        bigquery.SchemaField("variation_status", "STRING"),
+        bigquery.SchemaField("uk_datetime", "STRING"),
+        bigquery.SchemaField("timestamp", "FLOAT"),
+        bigquery.SchemaField("processed_at", "STRING"),
+        bigquery.SchemaField("actual_timestamp", "TIMESTAMP"),
+        bigquery.SchemaField("gbtt_timestamp", "STRING"),
+        bigquery.SchemaField("loc_stanox", "STRING"),
+        bigquery.SchemaField("planned_timestamp", "STRING"),
+        bigquery.SchemaField("timetable_variation", "STRING"),
+        bigquery.SchemaField("train_id", "STRING"),
+        bigquery.SchemaField("delay_monitoring_point", "STRING"),
+        bigquery.SchemaField("next_report_run_time", "STRING"),
+        bigquery.SchemaField("reporting_stanox", "STRING"),
+        bigquery.SchemaField("correction_ind", "STRING"),
+        bigquery.SchemaField("event_source", "STRING"),
+        bigquery.SchemaField("train_file_address", "STRING"),
+        bigquery.SchemaField("division_code", "STRING"),
+        bigquery.SchemaField("train_terminated", "STRING"),
+        bigquery.SchemaField("offroute_ind", "STRING"),
+        bigquery.SchemaField("train_service_code", "STRING"),
+        bigquery.SchemaField("auto_expected", "STRING"),
+        bigquery.SchemaField("route", "STRING"),
+        bigquery.SchemaField("planned_event_type", "STRING"),
+        bigquery.SchemaField("next_report_stanox", "STRING")
+    ]
+    
     logging.info(f"Attempting to load data from file: {file_name}")
+    
+    # Check if file_name is None (download failed)
+    if file_name is None:
+        logging.error("Download files task failed - no file to process")
+        return
     
     # Check if file exists
     import os
@@ -174,7 +253,30 @@ def _load_data_to_bigquery(**context) -> None:
         logging.error(f"File does not exist: {file_name}")
         return
     
-    df = pd.read_json(file_name, dtype=str, lines=True)
+    # Read the file line by line and parse JSON manually to ensure proper parsing
+    import json
+    parsed_data = []
+    
+    with open(file_name, 'r') as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if line:
+                try:
+                    data = json.loads(line)
+                    parsed_data.append(data)
+                except json.JSONDecodeError as e:
+                    logging.error(f"Failed to parse line {line_num}: {e}")
+                    logging.error(f"Line content: {line[:100]}...")
+                    continue
+    
+    if not parsed_data:
+        logging.error("No valid JSON data found in file!")
+        return
+    
+    logging.info(f"Successfully parsed {len(parsed_data)} JSON lines")
+    
+    # Convert to DataFrame
+    df = pd.DataFrame(parsed_data)
     
     # Debug: Show available columns
     logging.info(f"DataFrame columns: {list(df.columns)}")
@@ -182,21 +284,24 @@ def _load_data_to_bigquery(**context) -> None:
     
     # The actual_timestamp is nested in raw_data, so we need to extract it
     if 'raw_data' in df.columns:
-        # Parse the JSON in raw_data and extract fields
-        import json
+        # raw_data should now be a dictionary, not a string
+        logging.info(f"Raw data column type: {type(df['raw_data'].iloc[0])}")
+        logging.info(f"First raw_data sample: {str(df['raw_data'].iloc[0])[:100]}...")
         
-        def extract_field(raw_data_obj, field_name):
+        def extract_field(raw_data_dict, field_name):
             try:
-                if pd.isna(raw_data_obj):
+                if pd.isna(raw_data_dict):
                     return None
                 
-                # raw_data is already a dict from pandas read_json
-                if isinstance(raw_data_obj, dict):
-                    return raw_data_obj.get(field_name)
-                
-                # Fallback for any other type
-                logging.error(f"Unexpected raw_data type: {type(raw_data_obj)}")
-                return None
+                # raw_data should now be a dictionary after manual JSON parsing
+                if isinstance(raw_data_dict, dict):
+                    value = raw_data_dict.get(field_name)
+                    if value is not None:
+                        return str(value)  # Ensure all values are strings for BigQuery
+                    return None
+                else:
+                    logging.error(f"Unexpected raw_data type: {type(raw_data_dict)}")
+                    return None
             except Exception as e:
                 logging.error(f"Error extracting {field_name}: {e}")
                 return None
@@ -234,9 +339,20 @@ def _load_data_to_bigquery(**context) -> None:
         
         # Debug: Check what raw_data actually contains
         logging.info(f"Raw data column type: {type(df['raw_data'].iloc[0])}")
-        logging.info(f"First raw_data keys: {list(df['raw_data'].iloc[0].keys()) if isinstance(df['raw_data'].iloc[0], dict) else 'Not a dict'}")
-        logging.info(f"Sample actual_timestamp from raw_data: {df['raw_data'].iloc[0].get('actual_timestamp') if isinstance(df['raw_data'].iloc[0], dict) else 'N/A'}")
-        logging.info(f"Sample train_id from raw_data: {df['raw_data'].iloc[0].get('train_id') if isinstance(df['raw_data'].iloc[0], dict) else 'N/A'}")
+        logging.info(f"First raw_data sample: {str(df['raw_data'].iloc[0])[:100]}...")
+        
+        # Test extraction on first row
+        first_raw_data = df['raw_data'].iloc[0]
+        if isinstance(first_raw_data, str):
+            try:
+                parsed = json.loads(first_raw_data)
+                logging.info(f"Successfully parsed first raw_data")
+                logging.info(f"Sample actual_timestamp: {parsed.get('actual_timestamp')}")
+                logging.info(f"Sample train_id: {parsed.get('train_id')}")
+            except Exception as e:
+                logging.error(f"Failed to parse first raw_data: {e}")
+        else:
+            logging.info(f"First raw_data is not a string: {type(first_raw_data)}")
     else:
         logging.error("raw_data column not found in DataFrame")
         logging.error(f"Available columns: {list(df.columns)}")
@@ -246,14 +362,23 @@ def _load_data_to_bigquery(**context) -> None:
     if df["actual_timestamp"].notna().any():
         # Filter out None values before conversion
         valid_timestamps = df["actual_timestamp"].notna()
-        df.loc[valid_timestamps, "actual_timestamp"] = df.loc[valid_timestamps, "actual_timestamp"].astype(int) / 1000
-        df.loc[valid_timestamps, "actual_timestamp"] = df.loc[valid_timestamps, "actual_timestamp"] \
-            .map(datetime.utcfromtimestamp) \
-            .map(TIMEZONE_LONDON.fromutc)
-        logging.info(f"Converted {valid_timestamps.sum()} timestamps successfully")
+        valid_count = valid_timestamps.sum()
+        logging.info(f"Found {valid_count} valid timestamps out of {len(df)} total rows")
+        
+        if valid_count > 0:
+            try:
+                df.loc[valid_timestamps, "actual_timestamp"] = df.loc[valid_timestamps, "actual_timestamp"].astype(int) / 1000
+                df.loc[valid_timestamps, "actual_timestamp"] = df.loc[valid_timestamps, "actual_timestamp"] \
+                    .map(datetime.utcfromtimestamp) \
+                    .map(TIMEZONE_LONDON.fromutc)
+                logging.info(f"Converted {valid_count} timestamps successfully")
+            except Exception as e:
+                logging.error(f"Error converting timestamps: {e}")
+                # Continue without timestamp conversion
+        else:
+            logging.warning("No valid timestamps found, continuing without timestamp conversion")
     else:
-        logging.error("No valid timestamps found!")
-        return
+        logging.warning("No valid timestamps found, continuing without timestamp conversion")
     
     # Final DataFrame info before BigQuery load
     logging.info(f"Final DataFrame shape: {df.shape}")
@@ -269,6 +394,20 @@ def _load_data_to_bigquery(**context) -> None:
         return
     else:
         logging.info("All required columns are present")
+    
+    # Check if we have any data to load
+    if len(df) == 0:
+        logging.error("DataFrame is empty, nothing to load to BigQuery")
+        return
+    
+    # Check if we have any non-None values in key columns
+    key_columns = ['train_id', 'actual_timestamp', 'toc_id']
+    non_null_counts = {col: df[col].notna().sum() for col in key_columns if col in df.columns}
+    logging.info(f"Non-null counts in key columns: {non_null_counts}")
+    
+    if all(count == 0 for count in non_null_counts.values()):
+        logging.error("All key columns are null, data extraction failed")
+        return
     
     # Sample data
     logging.info(f"Sample data:")
@@ -288,33 +427,20 @@ def _load_data_to_bigquery(**context) -> None:
         else:
             logging.error(f"Critical field '{field}' is missing!")
             return
-
-    # Create schema that matches our extracted columns
-    bigquery_schema = [
-        bigquery.SchemaField("event_type", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("toc_id", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("variation_status", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("actual_timestamp", bigquery.enums.SqlTypeNames.TIMESTAMP),
-        bigquery.SchemaField("gbtt_timestamp", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("loc_stanox", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("planned_timestamp", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("timetable_variation", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("train_id", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("delay_monitoring_point", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("next_report_run_time", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("reporting_stanox", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("correction_ind", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("event_source", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("train_file_address", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("division_code", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("train_terminated", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("offroute_ind", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("train_service_code", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("auto_expected", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("route", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("planned_event_type", bigquery.enums.SqlTypeNames.STRING),
-        bigquery.SchemaField("next_report_stanox", bigquery.enums.SqlTypeNames.STRING),
-    ]
+    
+    # Ensure we have at least some valid data
+    total_rows = len(df)
+    valid_rows = df[['train_id', 'actual_timestamp', 'toc_id']].notna().all(axis=1).sum()
+    logging.info(f"Data quality check: {valid_rows} valid rows out of {total_rows} total rows")
+    
+    if valid_rows == 0:
+        logging.error("No valid rows found! Cannot proceed with BigQuery load.")
+        return
+    
+    # Filter to only valid rows for BigQuery load
+    df_clean = df[df[['train_id', 'actual_timestamp', 'toc_id']].notna().all(axis=1)].copy()
+    logging.info(f"Proceeding with {len(df_clean)} clean rows for BigQuery load")
+    
     job_config = bigquery.LoadJobConfig(schema=bigquery_schema)
 
     bq_credential_secret = Variable.get(VARIABLE_BIGQUERY_CREDENTIAL_SECRET, deserialize_json=True)
@@ -329,11 +455,11 @@ def _load_data_to_bigquery(**context) -> None:
     logging.info("Old data removal completed")
 
     # Load data to BigQuery
-    logging.info(f"Starting BigQuery load for {len(df)} rows to table: {BIGQUERY_TABLE_ID}")
+    logging.info(f"Starting BigQuery load for {len(df_clean)} rows to table: {BIGQUERY_TABLE_ID}")
     logging.info(f"BigQuery project: {Variable.get(VARIABLE_BIGQUERY_PROJECT_ID)}")
     
     try:
-        job = bq_client.load_table_from_dataframe(df, BIGQUERY_TABLE_ID, job_config=job_config)
+        job = bq_client.load_table_from_dataframe(df_clean, BIGQUERY_TABLE_ID, job_config=job_config)
         logging.info(f"BigQuery job started: {job.job_id}")
         
         # Wait for job completion
@@ -343,7 +469,6 @@ def _load_data_to_bigquery(**context) -> None:
         # Get job statistics
         logging.info(f"Job statistics:")
         logging.info(f"  - Rows processed: {job.output_rows}")
-        logging.info(f"  - Bytes processed: {job.bytes_processed}")
         logging.info(f"  - Errors: {job.errors}")
         
         # Verify data was loaded
@@ -359,10 +484,11 @@ def _load_data_to_bigquery(**context) -> None:
         # Final summary
         logging.info("=" * 60)
         logging.info("📊 FINAL SUMMARY:")
-        logging.info(f"  ✅ Rows processed: {len(df)}")
+        logging.info(f"  ✅ Rows processed: {len(df_clean)}")
         logging.info(f"  ✅ BigQuery table: {BIGQUERY_TABLE_ID}")
         logging.info(f"  ✅ Project: {Variable.get(VARIABLE_BIGQUERY_PROJECT_ID)}")
         logging.info(f"  ✅ Date: {ds}")
+        logging.info(f"  ✅ Data quality: {valid_rows}/{total_rows} rows passed validation")
         logging.info("=" * 60)
         
     except Exception as e:

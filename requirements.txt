@@ -14,8 +14,14 @@ confluent-kafka==2.3.0
 # Logging and utilities - Latest stable version
 colorama==0.4.6
 
+# Data analysis and visualization
+pandas==2.1.4
+matplotlib==3.8.2
+seaborn==0.13.0
+google-cloud-bigquery==3.13.0
+google-auth==2.23.4
+
 # Optional: For future web dashboard features
 # flask==3.0.0
 # requests==2.31.0
 # plotly==5.17.0
-# pandas==2.1.4
