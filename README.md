@@ -100,14 +100,32 @@ The project creates four key visualizations that provide comprehensive insights 
 **Data**: Movement counts by hour, showing peak and quiet periods
 **Insight**: Helps with capacity planning and schedule optimization
 
-### Chart 4: Station Performance Heatmap
-**Purpose**: Geographic and temporal performance analysis
-**Data**: Station performance by time of day using color-coded heatmap
-**Insight**: Identifies problem stations and time-based performance issues
+### Chart 4: Total Movements by Company Tree
+**Purpose**: Hierarchical view of train operating companies and their activity levels
+**Data**: Company performance with movement counts and hierarchical structure
+**Insight**: Shows which companies have the most activity and their performance patterns
 
 ## 🔗 Dashboard Access
 
-**Your Looker Studio Dashboard:** [Network Rail Performance Dashboard](https://lookerstudio.google.com/reporting/19c0f282-2a1c-4f50-a7a2-7b44239d58d4)
+**Your Looker Studio Dashboard:** [Network Rail Performance Dashboard](https://lookerstudio.google.com/u/1/reporting/19c0f282-2a1c-4f50-a7a2-7b44239d58d4/page/U1oUF/edit)
+
+## 📊 Dashboard Layout
+
+Your dashboard contains four key visualizations arranged in a 2x2 grid:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    NETWORK RAIL PERFORMANCE             │
+├─────────────────────────────────────────────────────────┤
+│  [Chart 1: Donut]      [Chart 2: Horizontal Bars]     │
+│  Punctuality           TOC Performance                 │
+│  Distribution          Ranking                         │
+│                                                         │
+│  [Chart 3: Line Chart] [Chart 4: Tree Chart]          │
+│  Hourly Patterns       Total Movements by Company      │
+│  Movement Trends       Hierarchical View               │
+└─────────────────────────────────────────────────────────┘
+```
 
 
 
@@ -170,11 +188,6 @@ docker compose up -d
 - ✅ **Dashboard Created**: Looker Studio charts displaying insights
 - ✅ **Connections Configured**: Airflow properly connected to MinIO and BigQuery
 
-## 🚀 Next Steps
 
-1. **Test the pipeline** and verify data flow
-2. **Create your Looker Studio dashboard** using the four chart types
-3. **Add your dashboard link** to this README
-4. **Customize queries** for specific business insights
 
 
