@@ -39,8 +39,8 @@ Network Rail STOMP Feed → Python Consumer → MinIO (Data Lake) → Airflow (E
 #### Step 1: Clone and Configure
 ```bash
 # Clone the project
-git clone <your-repo-url>
-cd dtc-data-engineering-zoomcamp-project
+git clone git@github.com:reanbrenda/data-engineering--zoomcamp.git
+cd data-engineering--zoomcamp
 
 # Configure Network Rail credentials
 cp secrets.json.example secrets.json
@@ -176,7 +176,5 @@ docker compose up -d
 2. **Create your Looker Studio dashboard** using the four chart types
 3. **Add your dashboard link** to this README
 4. **Customize queries** for specific business insights
-5. **Share dashboard** with stakeholders
-6. **Set up automated reporting** schedules
 
 
