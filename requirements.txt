@@ -4,6 +4,10 @@ stomp.py==8.0.1
 # Timezone handling - Latest stable version
 pytz==2023.3.post1
 
+# MinIO S3 compatibility - Latest stable version
+boto3==1.34.0
+botocore==1.34.0
+
 # Kafka client - Latest stable version (if needed for future use)
 confluent-kafka==2.3.0
 

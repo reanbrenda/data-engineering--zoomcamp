@@ -100,6 +100,118 @@ Network Rail Data Feed → Stream Processor → Data Lake → Analytics Warehous
    - Go to Airflow UI
    - Enable and trigger the BigQuery loading DAG
 
+## Container Management
+
+### Using Helper Scripts
+
+#### Linux/Mac (Shell Script)
+```bash
+# Make script executable
+chmod +x run_movement_consumer.sh
+
+# Build and run container
+./run_movement_consumer.sh run
+
+# View logs
+./run_movement_consumer.sh logs
+
+# Check status
+./run_movement_consumer.sh status
+
+# Stop container
+./run_movement_consumer.sh stop
+
+# Restart container
+./run_movement_consumer.sh restart
+
+# Clean up resources
+./run_movement_consumer.sh cleanup
+
+# Show help
+./run_movement_consumer.sh help
+```
+
+#### Windows (Batch File)
+```cmd
+# Build and run container
+run_movement_consumer.bat run
+
+# View logs
+run_movement_consumer.bat logs
+
+# Check status
+run_movement_consumer.bat status
+
+# Stop container
+run_movement_consumer.bat stop
+
+# Restart container
+run_movement_consumer.bat restart
+
+# Clean up resources
+run_movement_consumer.bat cleanup
+
+# Show help
+run_movement_consumer.bat help
+```
+
+### Direct Docker Commands
+
+```bash
+# Build and run container
+docker compose up -d
+
+# View logs (follow mode)
+docker compose logs -f
+
+# View last 100 lines of logs
+docker compose logs --tail=100
+
+# Check container status
+docker compose ps
+
+# Show resource usage
+docker stats
+
+# Stop container
+docker compose down
+
+# Restart container
+docker compose restart
+
+# Clean up (remove volumes and images)
+docker compose down --volumes --remove-orphans
+docker system prune -f
+
+# Build image without cache
+docker compose build --no-cache
+
+# Execute command in container
+docker compose exec movement-consumer python -c "print('Hello from container')"
+
+# Open shell in container
+docker compose exec movement-consumer /bin/bash
+```
+
+### Container Health and Monitoring
+
+```bash
+# Check container health
+docker compose ps
+
+# View real-time resource usage
+docker stats
+
+# Inspect container configuration
+docker compose config
+
+# View error logs only
+docker compose logs | grep -i error
+
+# Check container logs with timestamps
+docker compose logs -t
+```
+
 ## Data Flow Architecture
 
 1. **Data Ingestion**: Network Rail ActiveMQ → Kafka topics

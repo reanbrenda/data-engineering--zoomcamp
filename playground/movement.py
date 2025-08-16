@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Network Rail Train Movement Data Consumer
+Network Rail Train Movement Data Consumer & MinIO Loader
 
-This script connects to Network Rail's ActiveMQ feed to consume real-time train movement data.
-It processes movement messages and provides structured output for analysis.
+This script connects to Network Rail's ActiveMQ feed to consume real-time train movement data
+and loads it directly to MinIO data lake with time-based partitioning.
 """
 
 import json
@@ -15,6 +15,8 @@ from pathlib import Path
 from time import sleep
 from typing import Dict, Any, Optional
 
+import boto3
+from botocore.client import Config
 import stomp
 from pytz import timezone
 
@@ -30,6 +32,13 @@ SLEEP_INTERVAL = 1
 
 # Message type constants
 MESSAGE_TYPE_MOVEMENT = "0003"
+
+# MinIO Configuration
+MINIO_ENDPOINT = "http://minio:9000"  # Use Docker service name
+MINIO_ACCESS_KEY = "minio"
+MINIO_SECRET_KEY = "minio123"
+MINIO_BUCKET = "networkrail"
+MINIO_REGION = "us-east-1"
 
 # Setup logging
 logging.basicConfig(
@@ -53,12 +62,105 @@ class NetworkRailConnectionError(Exception):
     pass
 
 
+class MinIOConnectionError(Exception):
+    """Raised when connection to MinIO fails."""
+    pass
+
+
+class MinIODataLoader:
+    """Handles loading train movement data to MinIO data lake."""
+    
+    def __init__(self):
+        self.s3_client = None
+        self.bucket_name = MINIO_BUCKET
+        self.setup_minio_connection()
+    
+    def setup_minio_connection(self):
+        """Initialize MinIO connection."""
+        try:
+            self.s3_client = boto3.resource(
+                's3',
+                endpoint_url=MINIO_ENDPOINT,
+                aws_access_key_id=MINIO_ACCESS_KEY,
+                aws_secret_access_key=MINIO_SECRET_KEY,
+                config=Config(signature_version='s3v4'),
+                region_name=MINIO_REGION
+            )
+            
+            # Ensure bucket exists
+            self.ensure_bucket_exists()
+            logger.info("MinIO connection established successfully")
+            
+        except Exception as e:
+            raise MinIOConnectionError(f"Failed to connect to MinIO: {e}")
+    
+    def ensure_bucket_exists(self):
+        """Create MinIO bucket if it doesn't exist."""
+        try:
+            if not self.s3_client.Bucket(self.bucket_name).creation_date:
+                self.s3_client.create_bucket(Bucket=self.bucket_name)
+                logger.info(f"Created MinIO bucket: {self.bucket_name}")
+        except Exception as e:
+            logger.warning(f"Bucket check failed: {e}")
+    
+    def load_to_minio(self, movement_data: Dict[str, Any], timestamp: datetime) -> bool:
+        """
+        Load movement data to MinIO with time-based partitioning.
+        
+        Args:
+            movement_data: Processed movement data
+            timestamp: Timestamp for partitioning
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            logger.info(f"Attempting to load data to MinIO for TOC: {movement_data.get('toc_id', 'unknown')}")
+            
+            # Create time-based partition structure
+            year = timestamp.year
+            month = timestamp.month
+            day = timestamp.day
+            
+            # Generate unique filename
+            filename = f"{timestamp.strftime('%Y%m%d-%H%M%S')}-{movement_data.get('toc_id', 'unknown')}.json"
+            
+            # Create partition path
+            partition_path = f"year={year}/month={month:02}/day={day:02}/{filename}"
+            
+            logger.info(f"Partition path: {partition_path}")
+            
+            # Convert data to JSON
+            json_data = json.dumps(movement_data, indent=2)
+            
+            logger.info(f"JSON data size: {len(json_data)} bytes")
+            
+            # Upload to MinIO
+            self.s3_client.Bucket(self.bucket_name).put_object(
+                Key=partition_path,
+                Body=json_data.encode('utf-8'),
+                ContentType='application/json'
+            )
+            
+            logger.info(f"Data loaded to MinIO: {partition_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to load data to MinIO: {e}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            logger.error(f"Exception details: {str(e)}")
+            return False
+
+
 class MovementMessageProcessor:
     """Processes train movement messages from Network Rail feed."""
     
-    def __init__(self):
+    def __init__(self, minio_loader: MinIODataLoader):
+        self.minio_loader = minio_loader
         self.message_count = 0
         self.error_count = 0
+        self.minio_success_count = 0
+        self.minio_failure_count = 0
     
     def process_movement_message(self, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -91,10 +193,26 @@ class MovementMessageProcessor:
                 "variation_status": body.get("variation_status"),
                 "uk_datetime": uk_datetime.isoformat(),
                 "timestamp": timestamp,
-                "processed_at": datetime.now().isoformat()
+                "processed_at": datetime.now().isoformat(),
+                "raw_data": body  # Include raw data for analysis
             }
             
             self.message_count += 1
+            
+            # Load to MinIO
+            logger.info(f"Calling MinIO loader for message with TOC: {movement_data.get('toc_id', 'unknown')}")
+            minio_success = self.minio_loader.load_to_minio(movement_data, uk_datetime)
+            logger.info(f"MinIO loading result: {minio_success}")
+            
+            if minio_success:
+                self.minio_success_count += 1
+                movement_data['minio_success'] = True
+                logger.info(f"MinIO success count: {self.minio_success_count}")
+            else:
+                self.minio_failure_count += 1
+                movement_data['minio_success'] = False
+                logger.info(f"MinIO failure count: {self.minio_failure_count}")
+            
             return movement_data
             
         except (KeyError, ValueError, TypeError) as e:
@@ -106,7 +224,9 @@ class MovementMessageProcessor:
         """Get processing statistics."""
         return {
             "messages_processed": self.message_count,
-            "errors": self.error_count
+            "errors": self.error_count,
+            "minio_success": self.minio_success_count,
+            "minio_failures": self.minio_failure_count
         }
 
 
@@ -131,12 +251,12 @@ class NetworkRailListener(stomp.ConnectionListener):
     def on_error(self, frame):
         """Called when an error occurs."""
         logger.error(f"STOMP error: {frame.body}")
-    
+
     def on_message(self, frame):
         """Process incoming messages."""
         try:
             headers, message_raw = frame.headers, frame.body
-            
+
             # Acknowledge message receipt
             if "message-id" in headers and "subscription" in headers:
                 self.connection.ack(
@@ -146,11 +266,19 @@ class NetworkRailListener(stomp.ConnectionListener):
             
             # Parse and process messages
             parsed_body = json.loads(message_raw)
-            
+
             for message in parsed_body:
-                processed_data = self.processor.process_movement_message(message)
-                if processed_data:
-                    self._log_movement(processed_data)
+                try:
+                    logger.info(f"Processing message: {message.get('header', {}).get('msg_type', 'unknown')}")
+                    processed_data = self.processor.process_movement_message(message)
+                    if processed_data:
+                        logger.info(f"Message processed successfully, calling _log_movement")
+                        self._log_movement(processed_data)
+                    else:
+                        logger.warning(f"Message processing returned None")
+                except Exception as e:
+                    logger.error(f"Error processing individual message: {e}")
+                    logger.error(f"Message content: {message}")
                     
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse message: {e}")
@@ -163,7 +291,8 @@ class NetworkRailListener(stomp.ConnectionListener):
             f"Movement: {movement_data['event_type']} | "
             f"TOC: {movement_data['toc_id']} | "
             f"Status: {movement_data['variation_status']} | "
-            f"Time: {movement_data['uk_datetime']}"
+            f"Time: {movement_data['uk_datetime']} | "
+            f"MinIO: {'✅' if movement_data.get('minio_success') else '❌'}"
         )
 
 
@@ -173,7 +302,8 @@ class NetworkRailConsumer:
     def __init__(self, credentials_file: str = "secrets.json"):
         self.credentials_file = Path(credentials_file)
         self.connection = None
-        self.processor = MovementMessageProcessor()
+        self.minio_loader = MinIODataLoader()
+        self.processor = MovementMessageProcessor(self.minio_loader)
         self.running = False
         
         # Setup signal handlers for graceful shutdown
@@ -215,7 +345,7 @@ class NetworkRailConsumer:
             
             self.connection = stomp.Connection(
                 [(NETWORKRAIL_HOST, NETWORKRAIL_PORT)],
-                keepalive=True,
+        keepalive=True,
                 heartbeats=(HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL),
             )
             
@@ -250,7 +380,7 @@ class NetworkRailConsumer:
             self.connect()
             self.running = True
             
-            logger.info("Starting to consume train movement messages...")
+            logger.info("Starting to consume train movement messages and load to MinIO...")
             logger.info("Press Ctrl+C to stop")
             
             while self.running and self.connection and self.connection.is_connected():
@@ -289,6 +419,9 @@ def main():
         sys.exit(1)
     except NetworkRailConnectionError as e:
         logger.error(f"Connection error: {e}")
+        sys.exit(1)
+    except MinIOConnectionError as e:
+        logger.error(f"MinIO error: {e}")
         sys.exit(1)
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
